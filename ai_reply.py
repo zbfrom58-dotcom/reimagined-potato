@@ -1,10 +1,5 @@
 """
 Генерация текста ответа через Google Gemini API.
-
-Требуется переменная окружения GEMINI_API_KEY (получить ключ можно в
-Google AI Studio: https://aistudio.google.com/apikey).
-
-Ключ НИКОГДА не хранится в файлах проекта — только в переменной окружения.
 """
 
 import logging
@@ -12,27 +7,60 @@ import os
 
 import requests
 
+
 logger = logging.getLogger(__name__)
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL}:generateContent"
+
+# Можно переопределить через Railway Variables.
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+
+BASE_URL = "https://generativelanguage.googleapis.com/v1beta"
+
+TIMEOUT = 30
 
 
 def is_configured() -> bool:
     return bool(GEMINI_API_KEY)
 
 
-def generate_reply(user_message: str, persona: str) -> str | None:
+def list_models() -> list[str]:
     """
-    Запрашивает у Gemini короткий ответ в заданном "характере" (persona)
-    на сообщение собеседника. Возвращает текст ответа или None, если
-    ключ не задан, произошла ошибка, либо модель ничего не вернула.
-    Это синхронная (блокирующая) функция — вызывающий код должен
-    запускать её в отдельном потоке (asyncio.to_thread).
+    Возвращает список моделей, которые реально доступны
+    текущему GEMINI_API_KEY.
     """
+
     if not GEMINI_API_KEY:
-        logger.warning("GEMINI_API_KEY не задан — ИИ-ответ невозможен.")
+        return []
+
+    try:
+        response = requests.get(
+            f"{BASE_URL}/models",
+            params={"key": GEMINI_API_KEY},
+            timeout=TIMEOUT,
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+        return [
+            model.get("name", "").replace("models/", "")
+            for model in data.get("models", [])
+            if "generateContent"
+            in model.get("supportedGenerationMethods", [])
+        ]
+
+    except Exception as e:
+        logger.warning("Не удалось получить список моделей Gemini: %s", e)
+        return []
+
+
+def generate_reply(user_message: str, persona: str) -> str | None:
+    if not GEMINI_API_KEY:
+        logger.warning(
+            "GEMINI_API_KEY не задан — ИИ-ответ невозможен."
+        )
         return None
 
     prompt = (
@@ -42,31 +70,88 @@ def generate_reply(user_message: str, persona: str) -> str | None:
     )
 
     payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
+        "contents": [
+            {
+                "parts": [
+                    {
+                        "text": prompt
+                    }
+                ]
+            }
+        ],
         "generationConfig": {
             "temperature": 1.0,
             "maxOutputTokens": 200,
         },
     }
 
+    api_url = (
+        f"{BASE_URL}/models/{MODEL}:generateContent"
+    )
+
     try:
-        resp = requests.post(
-            API_URL,
+        response = requests.post(
+            api_url,
             params={"key": GEMINI_API_KEY},
             json=payload,
-            timeout=25,
+            timeout=TIMEOUT,
         )
-        resp.raise_for_status()
-        data = resp.json()
+
+        if response.status_code != 200:
+            logger.error(
+                "Gemini HTTP %s. Model=%s. Response=%s",
+                response.status_code,
+                MODEL,
+                response.text[:1000],
+            )
+            return None
+
+        data = response.json()
+
+    except requests.Timeout:
+        logger.warning(
+            "Gemini не ответил за %s секунд.",
+            TIMEOUT,
+        )
+        return None
+
+    except requests.RequestException as e:
+        logger.warning(
+            "Ошибка сети при запросе к Gemini: %s",
+            e,
+        )
+        return None
+
     except Exception as e:
-        logger.warning(f"Ошибка запроса к Gemini: {e}")
+        logger.exception(
+            "Неожиданная ошибка Gemini: %s",
+            e,
+        )
         return None
 
     candidates = data.get("candidates") or []
+
     if not candidates:
-        logger.warning(f"Gemini не вернул вариантов ответа: {data}")
+        logger.warning(
+            "Gemini не вернул вариантов ответа: %s",
+            data,
+        )
         return None
 
-    parts = candidates[0].get("content", {}).get("parts", [])
-    text = "".join(p.get("text", "") for p in parts).strip()
-    return text or None
+    content = candidates[0].get("content") or {}
+    parts = content.get("parts") or []
+
+    text = "".join(
+        part.get("text", "")
+        for part in parts
+        if isinstance(part, dict)
+    ).strip()
+
+    if not text:
+        logger.warning(
+            "Gemini вернул кандидата без текста: %s",
+            data,
+        )
+        return None
+
+    return text
