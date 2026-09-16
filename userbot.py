@@ -30,18 +30,16 @@ async def generate_and_send(account_key, message):
     if not text:
         return None
     cfg = RUNTIME[account_key]["config"]
-    persona = store.get_persona(account_key, cfg.persona)
+    if store.is_common_mode():
+        persona = store.get_common_persona(cfg.persona)
+    else:
+        persona = store.get_persona(account_key, cfg.persona)
     reply = await asyncio.to_thread(ai_reply.generate_reply, text, persona)
     if reply:
         await message.reply(reply)
     return reply
 
 def build_client(cfg):
-    """Create a Telegram client only from a pre-authorized StringSession.
-
-    Railway cannot answer Telethon's interactive phone/code prompts, so
-    authentication is deliberately never started from a blank session here.
-    """
     if not cfg.api_id or not cfg.api_hash or not cfg.session:
         return None
     return TelegramClient(StringSession(cfg.session), cfg.api_id, cfg.api_hash)
@@ -80,8 +78,13 @@ def register_handlers(account_key, client):
     async def incoming(event):
         if not store.is_enabled(account_key):
             return
-        if not store.is_allowed(account_key, event.chat_id):
+
+        chat_id = event.chat_id
+        # In common mode every account uses the shared group list.
+        allowed = store.is_common_allowed(chat_id) if store.is_common_mode() else store.is_allowed(account_key, chat_id)
+        if not allowed:
             return
+
         message = event.message
         if not (message.text or message.raw_text):
             return
@@ -89,12 +92,17 @@ def register_handlers(account_key, client):
         if is_automatic_channel_forward(message):
             if not store.is_autocomment_enabled(account_key):
                 return
-            if not store.bump_and_should_comment(account_key, event.chat_id):
+            if not store.bump_and_should_comment(account_key, chat_id):
                 return
         else:
-            if not store.is_reply_enabled(account_key, event.chat_id):
-                return
-            if not store.bump_and_should_reply_chat(account_key, event.chat_id):
+            if store.is_common_mode():
+                if not store.is_common_reply_enabled(chat_id):
+                    return
+            else:
+                if not store.is_reply_enabled(account_key, chat_id):
+                    return
+            # Common mode defaults to one response per incoming message.
+            if not store.bump_and_should_reply_chat(account_key, chat_id):
                 return
 
         try:
@@ -107,37 +115,15 @@ async def start_account(account_key):
     if runtime["client"] is not None:
         return True, "Уже запущен."
 
-    cfg = runtime["config"]
-    if not cfg.api_id or not cfg.api_hash:
-        runtime["status"] = "auth_required"
-        runtime["error"] = "Не заданы API_ID/API_HASH."
-        return False, "Не заданы API_ID/API_HASH."
-    if not cfg.session:
-        runtime["status"] = "auth_required"
-        runtime["error"] = "Не задан SESSION. Сначала добавь готовую StringSession в Railway Variables."
-        return False, "Не задан SESSION. Добавь готовую StringSession в Railway Variables."
-
-    try:
-        client = build_client(cfg)
-    except Exception as e:
-        runtime["status"] = "auth_required"
-        runtime["error"] = f"Некорректный SESSION: {e}"
-        logger.exception("[%s] Некорректный SESSION", account_key)
-        return False, f"Некорректный SESSION: {e}"
+    client = build_client(runtime["config"])
+    if client is None:
+        return False, "Не заданы API_ID/API_HASH/SESSION."
 
     runtime["client"] = client
     try:
-        # IMPORTANT: do not use client.start() here. With an empty/invalid
-        # session Telethon calls input() for a phone number, which crashes on
-        # Railway. connect() + is_user_authorized() never asks for input.
         await client.connect()
         if not await client.is_user_authorized():
-            await client.disconnect()
-            runtime["client"] = None
-            runtime["status"] = "auth_required"
-            runtime["error"] = "SESSION не авторизована. Сгенерируй новую StringSession локально и добавь её в Railway."
-            return False, "SESSION не авторизована. Нужна готовая авторизованная StringSession."
-
+            raise RuntimeError("Telegram-сессия не авторизована. Добавьте корректный SESSION для этого аккаунта.")
         me = await client.get_me()
         runtime["me"] = f"{me.first_name or ''} {me.last_name or ''}".strip()
         runtime["status"] = "running"

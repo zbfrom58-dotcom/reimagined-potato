@@ -56,7 +56,7 @@ h2{font-size:15px;color:var(--muted);margin:24px 0 10px}.flash{padding:10px 13px
 
 def page(title, body):
     nav = f"""
-    <div class="top"><h1>🤖 15 Accounts Admin</h1>
+    <div class="top"><h1>🤖 16 Accounts Admin</h1>
     <div class="nav">
       <a class="active" href="/">Аккаунты</a>
       <a href="/groups">Группы</a>
@@ -88,14 +88,7 @@ def dashboard():
         rt = RUNTIME.get(cfg.key, {})
         status = rt.get("status", "stopped")
         configured = bool(cfg.api_id and cfg.api_hash and cfg.session)
-        if status == "running":
-            pill = "🟢 работает"
-        elif status == "auth_required":
-            pill = "🟠 нужна авторизация"
-        elif status == "error":
-            pill = "🔴 ошибка"
-        else:
-            pill = "⚪ остановлен"
+        pill = "🟢 работает" if status == "running" else ("🔴 ошибка" if status == "error" else "⚪ остановлен")
         config_pill = "настроен" if configured else "не настроен"
         action = f"""
         <form method='post' action='/account/{cfg.key}/{"stop" if status=="running" else "start"}'>
@@ -108,10 +101,114 @@ def dashboard():
             <a href='/account/{cfg.key}'><button class='ghost'>⚙ Настройки и стиль</button></a>
             <a href='/account/{cfg.key}/groups'><button class='ghost'>📋 Группы</button></a>
           </div>
-          {(("<div class='muted' style='margin-top:8px'>" + ("Авторизация: " if status=="auth_required" else "Ошибка: ") + rt.get("error","") + "</div>")) if status in ("error", "auth_required") else ""}
+          {("<div class='muted' style='margin-top:8px'>Ошибка: "+rt.get("error","")+"</div>") if status=="error" else ""}
         </div>"""
     body = "<h2>16 независимых аккаунтов</h2>"+cards
     return page("Аккаунты", body)
+
+@app.route("/groups", methods=["GET", "POST"])
+@login_required
+def groups_page():
+    if request.method == "POST":
+        action = request.form.get("action")
+        if action == "save_common":
+            mode = request.form.get("mode", "common")
+            try:
+                store.set_mode(mode)
+                store.set_common_reply_interval(int(request.form.get("reply_interval", "1")))
+            except Exception:
+                pass
+            store.set_common_persona(request.form.get("common_persona", ""))
+            store.set_common_message_once(request.form.get("message_once") == "1")
+            return redirect("/groups")
+
+    groups = store.list_common_groups()
+    rows = ""
+    for gid, info in groups.items():
+        enabled = info.get("reply_enabled", True)
+        rows += f"""
+        <div class='card'>
+          <div class='row'>
+            <div><b>{store.display_label(info)}</b><div class='muted'>ID: {gid} · {'ответы включены' if enabled else 'ответы выключены'}</div></div>
+            <div class='actions'>
+              <form method='post' action='/groups/toggle'><input type='hidden' name='chat_id' value='{gid}'><input type='hidden' name='value' value='{'0' if enabled else '1'}'><button class='ghost'>{'🔕 Выключить' if enabled else '🔔 Включить'}</button></form>
+              <form method='post' action='/groups/remove'><input type='hidden' name='chat_id' value='{gid}'><button class='danger'>Удалить</button></form>
+            </div>
+          </div>
+        </div>"""
+
+    mode = store.get_mode()
+    persona = store.get_common_persona("Ты — обычный участник чата. Отвечай естественно и по смыслу сообщения.")
+    interval = store.get_common_reply_interval()
+    once = store.common_message_once()
+    body = f"""
+    <div class='row'><h2>🌐 Общий режим</h2><span class='pill'>{'АКТИВЕН' if mode == 'common' else 'не активен'}</span></div>
+    <div class='card'>
+      <form method='post'>
+        <input type='hidden' name='action' value='save_common'>
+        <h2 style='margin-top:0'>Режим работы</h2>
+        <label><input type='radio' name='mode' value='common' {'checked' if mode == 'common' else ''} style='width:auto'> 🌐 Общий — все аккаунты используют общий список групп и один общий ИИ-промпт</label><br><br>
+        <label><input type='radio' name='mode' value='personal' {'checked' if mode == 'personal' else ''} style='width:auto'> 👤 Личный — каждый аккаунт использует свои группы и свой промпт</label>
+
+        <h2>Общий ИИ-промпт</h2>
+        <textarea name='common_persona' placeholder='Общий промпт для всех аккаунтов...'>{persona}</textarea>
+        <p class='muted'>В «Общем» режиме этот промпт применяется ко всем 16 аккаунтам.</p>
+
+        <h2>Разовый ответ</h2>
+        <label><input name='message_once' type='checkbox' value='1' {'checked' if once else ''} style='width:auto'> Один раз отвечать на каждое входящее сообщение</label><br><br>
+        <label>Интервал сообщений: <input name='reply_interval' type='number' min='1' value='{interval}'></label>
+        <p class='muted'>При значении 1 каждый аккаунт отвечает на каждое подходящее сообщение один раз.</p><br>
+        <button>💾 Сохранить настройки общего режима</button>
+      </form>
+    </div>
+
+    <h2>Группы общего режима</h2>
+    <div class='card'>
+      <div class='row'><div><b>Общий список групп</b><div class='muted'>Эти группы используются всеми аккаунтами, когда активен «Общий» режим.</div></div><span class='pill'>{len(groups)} групп</span></div>
+    </div>
+    {rows or '<div class="card"><div class="muted">Общих групп пока нет.</div></div>'}
+    <div class='card'>
+      <h2 style='margin-top:0'>Добавить группу вручную</h2>
+      <form method='post' action='/groups/add'>
+        <input name='chat_id' placeholder='ID группы / канала' required><br><br>
+        <input name='username' placeholder='username, например my_group'><br><br>
+        <input name='title' placeholder='Название'><br><br>
+        <button>➕ Добавить в общий список</button>
+      </form>
+    </div>
+    """
+    return page("Общий режим и группы", body)
+
+@app.route("/groups/add", methods=["POST"])
+@login_required
+def common_group_add():
+    try:
+        chat_id = int(request.form["chat_id"])
+    except Exception:
+        return "Некорректный chat_id", 400
+    store.add_common_group(chat_id, request.form.get("username") or None, request.form.get("title") or None)
+    return redirect("/groups")
+
+@app.route("/groups/toggle", methods=["POST"])
+@login_required
+def common_group_toggle():
+    try:
+        chat_id = int(request.form["chat_id"])
+        value = request.form.get("value") == "1"
+    except Exception:
+        return "Bad request", 400
+    store.set_common_reply_enabled(chat_id, value)
+    return redirect("/groups")
+
+@app.route("/groups/remove", methods=["POST"])
+@login_required
+def common_group_remove():
+    try:
+        chat_id = int(request.form["chat_id"])
+    except Exception:
+        return "Некорректный chat_id", 400
+    store.remove_common_group(chat_id)
+    return redirect("/groups")
 
 @app.route("/account/<key>", methods=["GET","POST"])
 @login_required
@@ -138,7 +235,7 @@ def account_page(key):
     body = f"""
     <h2>{cfg.name}</h2>
     <div class='card'>
-      <div class='row'><span>Состояние: {'🟢 работает' if RUNTIME.get(key,{}).get('status') == 'running' else ('🟠 нужна авторизация' if RUNTIME.get(key,{}).get('status') == 'auth_required' else ('🔴 ошибка' if RUNTIME.get(key,{}).get('status') == 'error' else '⚪ остановлен'))}</span>
+      <div class='row'><span>Состояние: {'🟢 включён' if enabled else '🔴 выключен'}</span>
       <form method='post' action='/account/{key}/{"stop" if RUNTIME.get(key,{}).get("status")=="running" else "start"}'><button>{'⏹ Остановить' if RUNTIME.get(key,{}).get("status")=="running" else '▶ Запустить'}</button></form></div>
     </div>
     <div class='card'>
@@ -172,27 +269,150 @@ def account_action(key, action):
         store.set_enabled(key, False)
     return redirect("/")
 
-@app.route("/account/<key>/groups")
+@app.route("/account/<key>/groups", methods=["GET","POST"])
 @login_required
 def account_groups(key):
     cfg = next((x for x in CONFIGS if x.key == key), None)
     if not cfg: return "Not found", 404
+
+    discovered = []
+    discovery_error = ""
+    if request.method == "POST" and request.form.get("action") == "discover":
+        try:
+            discovered = run_async(discover_account_groups(key))
+        except Exception as e:
+            discovery_error = str(e)
+
     rows = ""
     for gid, info in store.list_groups(key).items():
-        rows += f"<div class='card'><div class='row'><b>{store.display_label(info)}</b><form method='post' action='/account/{key}/groups/remove'><input type='hidden' name='chat_id' value='{gid}'><button class='danger'>Удалить</button></form></div></div>"
-    body = f"<h2>{cfg.name} — группы</h2>{rows or '<div class=\"card\">Групп пока нет.</div>'}<div class='card'><form method='post' action='/account/{key}/groups/add'><input name='chat_id' placeholder='ID группы'><br><br><input name='username' placeholder='username (необязательно)'><br><br><input name='title' placeholder='Название'><br><br><button>Добавить</button></form></div>"
-    return page("Группы", body)
+        enabled = info.get("reply_enabled", True)
+        rows += f"""
+        <div class='card'>
+          <div class='row'>
+            <div><b>{store.display_label(info)}</b><div class='muted'>ID: {gid} · {'ответы включены' if enabled else 'ответы выключены'}</div></div>
+            <div class='actions'>
+              <form method='post' action='/account/{key}/groups/toggle'><input type='hidden' name='chat_id' value='{gid}'><input type='hidden' name='value' value='{'0' if enabled else '1'}'><button class='ghost'>{'🔕 Выключить' if enabled else '🔔 Включить'}</button></form>
+              <form method='post' action='/account/{key}/groups/remove'><input type='hidden' name='chat_id' value='{gid}'><button class='danger'>Удалить</button></form>
+            </div>
+          </div>
+        </div>"""
+
+    discovery_html = ""
+    if discovery_error:
+        discovery_html = f"<div class='flash err'>Ошибка автообнаружения: {discovery_error}</div>"
+    elif discovered:
+        items = ""
+        for item in discovered:
+            gid = item['id']; username = item.get('username') or ''; title = item.get('title') or 'Без названия'
+            label = ('@'+username) if username else title
+            items += f"""<label class='card' style='display:block;cursor:pointer'><input type='checkbox' name='chat_ids' value='{gid}' style='width:auto'> <b>{label}</b><div class='muted'>ID: {gid}</div></label>"""
+        discovery_html = f"""
+        <div class='card'>
+          <h2 style='margin-top:0'>🔎 Найденные Telegram-чаты</h2>
+          <div class='muted' style='margin-bottom:10px'>Выбери чаты, которые добавить в личный список этого аккаунта.</div>
+          <form method='post' action='/account/{key}/groups/add-discovered'>
+            {items}
+            <button>➕ Добавить выбранные</button>
+          </form>
+        </div>"""
+
+    body = f"""
+    <div class='row'><h2>{cfg.name} — личные группы</h2><a href='/'><button class='ghost'>← К аккаунтам</button></a></div>
+    <div class='card'>
+      <div class='row'><div><b>👤 Личный список</b><div class='muted' style='margin-top:6px'>Эти группы принадлежат только аккаунту {cfg.name}. Они не меняют общий список.</div></div><span class='pill'>{len(store.list_groups(key))} групп</span></div>
+    </div>
+    <div class='card'>
+      <form method='post'>
+        <input type='hidden' name='action' value='discover'>
+        <button>🔎 Автообнаружение групп</button>
+      </form>
+      <div class='muted' style='margin-top:8px'>Поиск выполняется от имени этого Telegram-аккаунта и показывает чаты, к которым у него есть доступ.</div>
+    </div>
+    {discovery_html}
+    {rows or '<div class="card"><div class="muted">Личных групп пока нет.</div></div>'}
+    <div class='card'>
+      <h2 style='margin-top:0'>Добавить вручную</h2>
+      <form method='post' action='/account/{key}/groups/add'>
+        <input name='chat_id' placeholder='ID группы / канала' required><br><br>
+        <input name='username' placeholder='username (необязательно)'><br><br>
+        <input name='title' placeholder='Название'><br><br>
+        <button>➕ Добавить</button>
+      </form>
+    </div>
+    """
+    return page("Личные группы", body)
+
+async def discover_account_groups(key):
+    runtime = RUNTIME.get(key)
+    if not runtime or not runtime.get("client"):
+        raise RuntimeError("Сначала авторизуй и запусти этот аккаунт.")
+    client = runtime["client"]
+    found = []
+    async for dialog in client.iter_dialogs():
+        entity = dialog.entity
+        # Only real groups/channels; ignore private 1:1 dialogs.
+        is_group_or_channel = getattr(entity, "megagroup", False) or isinstance(entity, Channel)
+        if not is_group_or_channel:
+            continue
+        found.append({
+            "id": int(dialog.id),
+            "title": dialog.title or "Без названия",
+            "username": getattr(entity, "username", None),
+        })
+    return found
+
+@app.route("/account/<key>/groups/add-discovered", methods=["POST"])
+@login_required
+def account_groups_add_discovered(key):
+    cfg = next((x for x in CONFIGS if x.key == key), None)
+    if not cfg: return "Not found", 404
+    ids = request.form.getlist("chat_ids")
+    runtime = RUNTIME.get(key)
+    if not runtime or not runtime.get("client"):
+        return redirect(f"/account/{key}/groups")
+    client = runtime["client"]
+    async def add_selected():
+        for raw in ids:
+            try:
+                entity = await client.get_entity(int(raw))
+                store.add_group(key, int(raw), getattr(entity, "username", None), getattr(entity, "title", None))
+            except Exception:
+                continue
+    try:
+        run_async(add_selected())
+    except Exception:
+        pass
+    return redirect(f"/account/{key}/groups")
+
+@app.route("/account/<key>/groups/toggle", methods=["POST"])
+@login_required
+def group_toggle(key):
+    try:
+        chat_id = int(request.form["chat_id"])
+        value = request.form.get("value") == "1"
+    except Exception:
+        return "Bad request", 400
+    store.set_reply_enabled(key, chat_id, value)
+    return redirect(f"/account/{key}/groups")
 
 @app.route("/account/<key>/groups/add", methods=["POST"])
 @login_required
 def group_add(key):
-    store.add_group(key, int(request.form["chat_id"]), request.form.get("username") or None, request.form.get("title") or None)
+    try:
+        chat_id = int(request.form["chat_id"])
+    except Exception:
+        return "Некорректный chat_id", 400
+    store.add_group(key, chat_id, request.form.get("username") or None, request.form.get("title") or None)
     return redirect(f"/account/{key}/groups")
 
 @app.route("/account/<key>/groups/remove", methods=["POST"])
 @login_required
 def group_remove(key):
-    store.remove_group(key, int(request.form["chat_id"]))
+    try:
+        chat_id = int(request.form["chat_id"])
+    except Exception:
+        return "Некорректный chat_id", 400
+    store.remove_group(key, chat_id)
     return redirect(f"/account/{key}/groups")
 
 def run_panel():
