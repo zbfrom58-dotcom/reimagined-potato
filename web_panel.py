@@ -74,22 +74,61 @@ def csrf_ok():
 
 STYLE = """
 <style>
-body{margin:0;background:#0b0d12;color:#eef0f5;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
-main{max-width:1050px;margin:auto;padding:18px}
-.top{position:sticky;top:0;background:#0b0d12f2;border-bottom:1px solid #282d3c;padding:15px;z-index:5}
-.top h1{margin:0 0 12px;font-size:19px}.nav{display:flex;gap:7px;overflow:auto}
-.nav a{color:#9aa3b8;text-decoration:none;background:#151822;padding:8px 12px;border-radius:18px;white-space:nowrap}
-.nav a.active{background:#617df0;color:white}.card{background:#151822;border:1px solid #282d3c;border-radius:14px;padding:15px;margin-bottom:11px}
-.row{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(310px,1fr));gap:11px}
-.muted{color:#8b93a7;font-size:13px}.green{color:#3ecf8e}.red{color:#ef5b5b}.yellow{color:#e8bd62}
-.pill{background:#1b1f2b;border-radius:20px;padding:4px 10px;font-size:12px}
-.actions{display:flex;gap:7px;flex-wrap:wrap}a{text-decoration:none;color:inherit}
-button{border:0;border-radius:8px;padding:9px 13px;background:#617df0;color:white;font-weight:600;cursor:pointer}
-button.ghost{background:transparent;border:1px solid #282d3c}button.danger{background:transparent;color:#ef5b5b;border:1px solid #ef5b5b}
-input,textarea{background:#1b1f2b;border:1px solid #282d3c;border-radius:8px;color:#eef0f5;padding:9px;font:inherit;width:100%;box-sizing:border-box}
-textarea{min-height:140px}h2{font-size:15px;color:#8b93a7;margin:24px 0 10px}
-.err{padding:10px;border-radius:8px;background:#3a1d1f;color:#ef5b5b;margin-bottom:10px}
+*{box-sizing:border-box}
+html{background:#0b0d12}
+body{margin:0;background:#0b0d12;color:#eef0f5;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;line-height:1.4;overflow-x:hidden}
+main{width:100%;max-width:1050px;margin:0 auto;padding:18px 16px 32px}
+.top{position:sticky;top:0;background:rgba(11,13,18,.96);backdrop-filter:blur(10px);border-bottom:1px solid #282d3c;padding:14px max(16px,calc((100vw - 1050px)/2));z-index:20}
+.top h1{margin:0 0 12px;font-size:19px;line-height:1.2}
+.nav{display:flex;gap:8px;overflow-x:auto;overscroll-behavior-x:contain;scrollbar-width:none;padding-bottom:2px}
+.nav::-webkit-scrollbar{display:none}
+.nav a{color:#9aa3b8;text-decoration:none;background:#151822;padding:9px 13px;border-radius:20px;white-space:nowrap;flex:0 0 auto}
+.nav a.active{background:#617df0;color:white}
+.card{display:block;width:100%;background:#151822;border:1px solid #282d3c;border-radius:16px;padding:15px;margin:0 0 11px;overflow:hidden}
+.row{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;min-width:0}
+.row>div{min-width:0}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(310px,100%),1fr));gap:11px}
+.muted{color:#8b93a7;font-size:13px;overflow-wrap:anywhere}
+.green{color:#3ecf8e}.red{color:#ef5b5b}.yellow{color:#e8bd62}
+.pill{background:#1b1f2b;border-radius:20px;padding:5px 10px;font-size:12px;white-space:nowrap}
+.actions{display:flex;gap:7px;flex-wrap:wrap;align-items:center}
+.actions form{margin:0;max-width:100%}
+a{text-decoration:none;color:inherit}
+button{border:0;border-radius:9px;padding:10px 13px;background:#617df0;color:white;font-weight:600;cursor:pointer;min-height:40px;max-width:100%}
+button.ghost{background:transparent;border:1px solid #394052}button.danger{background:transparent;color:#ef5b5b;border:1px solid #ef5b5b}
+input,textarea{background:#1b1f2b;border:1px solid #282d3c;border-radius:9px;color:#eef0f5;padding:10px;font:inherit;width:100%;max-width:100%}
+textarea{min-height:140px;resize:vertical}
+h2{font-size:15px;color:#8b93a7;margin:24px 0 10px}
+.err{padding:10px;border-radius:9px;background:#3a1d1f;color:#ef5b5b;margin-bottom:10px;overflow-wrap:anywhere}
+form{max-width:100%}
+label{display:block}
+input[type="checkbox"],input[type="radio"]{width:auto;max-width:none;flex:0 0 auto}
+.discover-list{display:grid;grid-template-columns:1fr;gap:8px;margin-bottom:12px}
+.discover-item{display:flex;align-items:center;gap:11px;width:100%;margin:0;padding:12px 13px;border:1px solid #282d3c;border-radius:12px;background:#11141c;cursor:pointer;min-width:0}
+.discover-item:hover{border-color:#617df0}
+.discover-item .discover-text{min-width:0;flex:1;overflow:hidden}
+.discover-item .discover-title{display:block;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.discover-item .discover-id{display:block;margin-top:2px;overflow-wrap:anywhere}
+.discover-actions{position:sticky;bottom:8px;z-index:3;background:#151822;padding-top:8px}
+.mobile-full{width:100%}
+@media (max-width:700px){
+  main{padding:14px 10px 28px}
+  .top{padding:12px 10px}
+  .top h1{font-size:18px}
+  .card{border-radius:14px;padding:13px;margin-bottom:9px}
+  .grid{grid-template-columns:1fr;gap:9px}
+  .row{align-items:stretch}
+  .row>.actions,.row>form,.row>a{width:100%}
+  .row>.actions button,.row>form button,.row>a button{width:100%}
+  .actions{width:100%}
+  .actions form{flex:1 1 150px}
+  .actions form button{width:100%}
+  button{width:100%;min-height:42px}
+  .nav a{padding:9px 12px}
+  .discover-item{padding:12px 10px}
+  .discover-item .discover-title{white-space:normal;overflow:visible;text-overflow:clip;overflow-wrap:anywhere}
+  .discover-actions{bottom:4px}
+}
 </style>
 """
 
@@ -549,15 +588,20 @@ def account_groups(key):
         discovered = f"<div class='err'>Ошибка: {escape(error)}</div>"
     elif found:
         items = "".join(
-            f"<label class='card'><input type='checkbox' name='ids' value='{x['id']}' style='width:auto'> "
-            f"<b>{escape('@'+x['username'] if x.get('username') else x['title'])}</b> "
-            f"<span class='muted'>ID {x['id']}</span></label>"
+            f"<label class='discover-item'>"
+            f"<input type='checkbox' name='ids' value='{x['id']}'>"
+            f"<span class='discover-text'>"
+            f"<span class='discover-title'>{escape('@'+x['username'] if x.get('username') else x['title'])}</span>"
+            f"<span class='muted discover-id'>ID {x['id']}</span>"
+            f"</span></label>"
             for x in found
         )
         discovered = f"""
         <div class="card"><h2 style="margin-top:0">Найденные чаты</h2>
         <form method="post" action="/account/{key}/groups/add-found">
-        {csrf()}{items}<button>➕ Добавить выбранные</button></form></div>
+        {csrf()}<div class="discover-list">{items}</div>
+        <div class="discover-actions"><button class="mobile-full">➕ Добавить выбранные</button></div>
+        </form></div>
         """
 
     body = f"""
