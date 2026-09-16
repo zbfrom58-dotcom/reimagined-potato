@@ -1,14 +1,28 @@
-# 16 Accounts — Common / Personal mode
+# 16 Accounts Admin
 
-## What changed
-- `Группы` now contains a real **Общий режим / Личный режим** switch.
-- In **Общий** mode all accounts use the same shared group list and the same shared AI prompt.
-- Shared reply interval is configurable; default is `1`, meaning one response per qualifying incoming message for each enabled account.
-- Shared groups can be toggled on/off and removed.
-- Personal mode keeps each account's own groups, prompt and intervals.
-- Each account page still has its own **Автообнаружение групп**.
-- Gemini supports **7 rotating keys**: `GEMINI_API_KEY_1` ... `GEMINI_API_KEY_7`. Legacy `GEMINI_API_KEY` is accepted as a fallback/extra key.
-- Telegram startup is non-interactive: the service never asks Railway for a phone number. A missing/invalid session marks that account as an error instead of crashing the whole process.
+## Режимы
+- **Общий**: один общий ИИ-промпт и один общий список групп для всех 16 аккаунтов.
+- **Личный**: каждый аккаунт использует свои группы, свой промпт и свои интервалы.
 
-## Important
-Do not commit Telegram session strings or Gemini keys to GitHub. Put them only in Railway variables.
+## Общий режим
+На странице **Группы** есть главный выключатель общего режима.
+
+Когда он включён:
+- админка пытается запустить все 16 настроенных аккаунтов;
+- каждый запущенный аккаунт слушает только выбранные в общем списке группы;
+- используется один общий ИИ-промпт;
+- каждый аккаунт может ответить один раз на каждое подходящее входящее сообщение;
+- сообщения от других подключённых аккаунтов также считаются входящими для остальных аккаунтов, поэтому они могут отвечать друг другу и обычным участникам.
+
+Когда общий режим выключен:
+- аккаунты, запущенные самим общим выключателем, останавливаются;
+- можно переключиться в личный режим и управлять аккаунтами отдельно.
+
+## Автообнаружение
+В **Аккаунты → конкретный аккаунт → Группы** доступна кнопка автообнаружения. Она выполняется от имени выбранного Telegram-аккаунта и показывает чаты/группы, доступные именно ему.
+
+## Railway
+Telegram SESSION должен быть готов заранее. `userbot.py` не использует интерактивный `client.start()`, поэтому Railway не спрашивает телефон в консоли.
+
+## Gemini
+Поддерживаются `GEMINI_API_KEY_1` ... `GEMINI_API_KEY_7`. Старый `GEMINI_API_KEY` также поддерживается как дополнительный fallback.

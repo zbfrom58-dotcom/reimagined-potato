@@ -54,12 +54,12 @@ h2{font-size:15px;color:var(--muted);margin:24px 0 10px}.flash{padding:10px 13px
 </style>
 """
 
-def page(title, body):
+def page(title, body, active='accounts'):
     nav = f"""
     <div class="top"><h1>🤖 16 Accounts Admin</h1>
     <div class="nav">
-      <a class="active" href="/">Аккаунты</a>
-      <a href="/groups">Группы</a>
+      <a class="{'active' if active=='accounts' else ''}" href="/">Аккаунты</a>
+      <a class="{'active' if active=='groups' else ''}" href="/groups">Группы</a>
       <a href="/logout">Выйти</a>
     </div></div>
     <main>{body}</main>
@@ -106,6 +106,41 @@ def dashboard():
     body = "<h2>16 независимых аккаунтов</h2>"+cards
     return page("Аккаунты", body)
 
+@app.route("/common/toggle", methods=["POST"])
+@login_required
+def common_toggle():
+    enabled = request.form.get("value") == "1"
+    store.set_common_enabled(enabled)
+    if enabled and LOOP is not None and START_ACCOUNT is not None:
+        # Common mode is a master switch: start every configured account.
+        async def start_all_common():
+            results = {}
+            for cfg in CONFIGS:
+                ok, msg = await START_ACCOUNT(cfg.key)
+                results[cfg.key] = ok
+                if ok:
+                    RUNTIME.setdefault(cfg.key, {})["common_started"] = True
+            return results
+        try:
+            run_async(start_all_common(), timeout=120)
+        except Exception:
+            pass
+    elif not enabled and LOOP is not None and STOP_ACCOUNT is not None:
+        # Only stop accounts that were started by the common-mode master switch.
+        async def stop_common_started():
+            for cfg in CONFIGS:
+                rt = RUNTIME.get(cfg.key, {})
+                if rt.get("common_started"):
+                    try:
+                        await STOP_ACCOUNT(cfg.key)
+                    finally:
+                        rt["common_started"] = False
+        try:
+            run_async(stop_common_started(), timeout=120)
+        except Exception:
+            pass
+    return redirect("/groups")
+
 @app.route("/groups", methods=["GET", "POST"])
 @login_required
 def groups_page():
@@ -120,6 +155,7 @@ def groups_page():
                 pass
             store.set_common_persona(request.form.get("common_persona", ""))
             store.set_common_message_once(request.form.get("message_once") == "1")
+            store.set_common_enabled(request.form.get("common_enabled") == "1")
             return redirect("/groups")
 
     groups = store.list_common_groups()
@@ -138,24 +174,37 @@ def groups_page():
         </div>"""
 
     mode = store.get_mode()
+    common_enabled = store.is_common_enabled()
     persona = store.get_common_persona("Ты — обычный участник чата. Отвечай естественно и по смыслу сообщения.")
     interval = store.get_common_reply_interval()
     once = store.common_message_once()
     body = f"""
-    <div class='row'><h2>🌐 Общий режим</h2><span class='pill'>{'АКТИВЕН' if mode == 'common' else 'не активен'}</span></div>
+    <div class='row'><h2>🌐 Общий режим</h2>
+      <span class='pill'>{'🟢 ВКЛЮЧЕН' if common_enabled and mode == 'common' else '⚪ ВЫКЛЮЧЕН'}</span>
+    </div>
+    <div class='card'>
+      <div class='row'>
+        <div><b>Главный выключатель общего режима</b><div class='muted'>Когда включён, все запущенные Telegram-аккаунты работают в выбранных общих группах по общему ИИ-промпту.</div></div>
+        <form method='post' action='/common/toggle'>
+          <input type='hidden' name='value' value='{'0' if common_enabled else '1'}'>
+          <button class='{"danger" if common_enabled else ""}'>{'⏹ Выключить общий режим' if common_enabled else '▶ Включить общий режим'}</button>
+        </form>
+      </div>
+    </div>
     <div class='card'>
       <form method='post'>
         <input type='hidden' name='action' value='save_common'>
         <h2 style='margin-top:0'>Режим работы</h2>
         <label><input type='radio' name='mode' value='common' {'checked' if mode == 'common' else ''} style='width:auto'> 🌐 Общий — все аккаунты используют общий список групп и один общий ИИ-промпт</label><br><br>
-        <label><input type='radio' name='mode' value='personal' {'checked' if mode == 'personal' else ''} style='width:auto'> 👤 Личный — каждый аккаунт использует свои группы и свой промпт</label>
+        <label><input type='radio' name='mode' value='personal' {'checked' if mode == 'personal' else ''} style='width:auto'> 👤 Личный — каждый аккаунт использует свои группы и свой промпт</label><p class='muted'>Главный выключатель выше запускает/останавливает все аккаунты для Общего режима. В Общем режиме их индивидуальные переключатели не требуются.</p>
 
         <h2>Общий ИИ-промпт</h2>
         <textarea name='common_persona' placeholder='Общий промпт для всех аккаунтов...'>{persona}</textarea>
         <p class='muted'>В «Общем» режиме этот промпт применяется ко всем 16 аккаунтам.</p>
 
-        <h2>Разовый ответ</h2>
-        <label><input name='message_once' type='checkbox' value='1' {'checked' if once else ''} style='width:auto'> Один раз отвечать на каждое входящее сообщение</label><br><br>
+        <h2>Ответы в общем режиме</h2>
+        <label><input name='message_once' type='checkbox' value='1' {'checked' if once else ''} style='width:auto'> Разово отвечать на каждое входящее сообщение</label><br><br>
+        <p class='muted'>Каждый запущенный аккаунт отвечает один раз на одно входящее сообщение в каждой выбранной общей группе. Сообщения от других твоих аккаунтов тоже считаются входящими.</p>
         <label>Интервал сообщений: <input name='reply_interval' type='number' min='1' value='{interval}'></label>
         <p class='muted'>При значении 1 каждый аккаунт отвечает на каждое подходящее сообщение один раз.</p><br>
         <button>💾 Сохранить настройки общего режима</button>
@@ -177,7 +226,7 @@ def groups_page():
       </form>
     </div>
     """
-    return page("Общий режим и группы", body)
+    return page("Общий режим и группы", body, active='groups')
 
 @app.route("/groups/add", methods=["POST"])
 @login_required
@@ -340,7 +389,7 @@ def account_groups(key):
       </form>
     </div>
     """
-    return page("Личные группы", body)
+    return page("Личные группы", body, active='accounts')
 
 async def discover_account_groups(key):
     runtime = RUNTIME.get(key)

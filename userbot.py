@@ -76,7 +76,11 @@ def register_handlers(account_key, client):
 
     @client.on(events.NewMessage(incoming=True))
     async def incoming(event):
-        if not store.is_enabled(account_key):
+        # Account must be enabled, and common mode also has its own master switch.
+        if store.is_common_mode():
+            if not store.is_common_enabled():
+                return
+        elif not store.is_enabled(account_key):
             return
 
         chat_id = event.chat_id
@@ -151,6 +155,13 @@ async def start_enabled_accounts():
         if store.is_enabled(cfg.key):
             await start_account(cfg.key)
 
+
+async def start_common_accounts():
+    for cfg in CONFIGS:
+        ok, _ = await start_account(cfg.key)
+        if ok:
+            RUNTIME[cfg.key]["common_started"] = True
+
 def init_runtime():
     for cfg in CONFIGS:
         RUNTIME[cfg.key] = {
@@ -167,7 +178,10 @@ async def main():
     web_panel.set_runtime(RUNTIME, loop, start_account, stop_account)
     threading.Thread(target=web_panel.run_panel, daemon=True).start()
 
-    await start_enabled_accounts()
+    if store.is_common_mode() and store.is_common_enabled():
+        await start_common_accounts()
+    else:
+        await start_enabled_accounts()
 
     while True:
         await asyncio.sleep(3600)

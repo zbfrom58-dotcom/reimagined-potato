@@ -24,6 +24,7 @@ COMMON_DEFAULTS = {
     'reply_interval': 1,
     'groups': {},
     'message_once': True,
+    'enabled': False,
 }
 
 
@@ -179,6 +180,14 @@ def set_common_message_once(value: bool):
     d = _common_load(); d['message_once'] = bool(value); _save(COMMON_KEY, d)
 
 
+def set_common_enabled(value: bool):
+    d = _common_load(); d['enabled'] = bool(value); _save(COMMON_KEY, d)
+
+
+def is_common_enabled() -> bool:
+    return bool(_common_load().get('enabled', False))
+
+
 def add_common_group(chat_id: int, username=None, title=None):
     add_group(COMMON_KEY, chat_id, username, title)
 
@@ -228,5 +237,7 @@ def bump_and_should_comment(account_key: str, chat_id: int) -> bool:
 
 def bump_and_should_reply_chat(account_key: str, chat_id: int) -> bool:
     if is_common_mode():
-        return _bump(COMMON_KEY, chat_id, 'chat_counters', get_common_reply_interval())
+        # Counter belongs to the account, so every running account can reply once
+        # to the same incoming message/event according to the common interval.
+        return _bump(account_key, chat_id, 'chat_counters', get_common_reply_interval())
     return _bump(account_key, chat_id, 'chat_counters', get_chat_interval(account_key))
