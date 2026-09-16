@@ -53,12 +53,26 @@ def _env(name: str) -> str | None:
     return value.strip() if value else None
 
 def load_accounts() -> list[AccountConfig]:
+    """Load 16 accounts using one shared Telegram API_ID/API_HASH.
+
+    API_ID and API_HASH are global for the whole installation. Each account
+    only needs its own StringSession variable: <ACCOUNT_KEY>_SESSION.
+    For backward compatibility, per-account API_ID/API_HASH are accepted as
+    fallback when the shared variables are missing.
+    """
+    shared_api_id_raw = _env("API_ID")
+    shared_api_hash = _env("API_HASH")
+    shared_api_id = int(shared_api_id_raw) if shared_api_id_raw and shared_api_id_raw.isdigit() else None
+
     result = []
     for key, name in NAMES:
-        api_id_raw = _env(f"{key.upper()}_API_ID")
-        api_hash = _env(f"{key.upper()}_API_HASH")
+        api_id_raw = shared_api_id_raw or _env(f"{key.upper()}_API_ID")
+        api_hash = shared_api_hash or _env(f"{key.upper()}_API_HASH")
         session = _env(f"{key.upper()}_SESSION")
-        api_id = int(api_id_raw) if api_id_raw and api_id_raw.isdigit() else None
+        api_id = shared_api_id
+        if api_id is None and api_id_raw and api_id_raw.isdigit():
+            api_id = int(api_id_raw)
+
         result.append(AccountConfig(
             key=key,
             name=name,
