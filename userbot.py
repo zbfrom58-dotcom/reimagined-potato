@@ -1,190 +1,305 @@
+
 import asyncio
 import logging
 import os
 import threading
-from telethon import TelegramClient, events, utils
+from typing import Optional
+
+from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.types import Channel
 
 import ai_reply
 import multi_store as store
 import web_panel
-from accounts import load_accounts
+from accounts import AccountConfig, load_accounts
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("userbot")
 
 CONFIGS = load_accounts()
-RUNTIME = {}
-RUNTIME_LOCK = threading.RLock()
+CONFIG_BY_KEY = {cfg.key: cfg for cfg in CONFIGS}
 
-def is_automatic_channel_forward(message) -> bool:
+# Always create a runtime slot for every configured account.
+# web_panel relies on these slots existing even while an account is stopped.
+RUNTIME = {
+    cfg.key: {
+        "client": None,
+        "status": "stopped",
+        "error": "",
+        "me": None,
+        "handler_bound": False,
+        "common_started": False,
+    }
+    for cfg in CONFIGS
+}
+
+LOOP: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _is_common_mode() -> bool:
+    return store.is_common_mode()
+
+
+def _account_enabled(key: str) -> bool:
+    if _is_common_mode():
+        return store.is_common_enabled()
+    return store.is_enabled(key)
+
+
+def _allowed(key: str, chat_id: int) -> bool:
+    if _is_common_mode():
+        return store.is_common_allowed(chat_id)
+    return store.is_allowed(key, chat_id)
+
+
+def _reply_enabled(key: str, chat_id: int) -> bool:
+    if _is_common_mode():
+        return store.is_common_reply_enabled(chat_id)
+    return store.is_reply_enabled(key, chat_id)
+
+
+def _persona(key: str) -> str:
+    cfg = CONFIG_BY_KEY[key]
+    if _is_common_mode():
+        return store.get_common_persona(
+            "Ты — обычный участник чата. Отвечай естественно, коротко и по смыслу."
+        )
+    return store.get_persona(key, cfg.persona)
+
+
+def _is_automatic_channel_forward(message) -> bool:
     if not message.fwd_from:
         return False
     if not getattr(message.fwd_from, "channel_post", None):
         return False
     return isinstance(message.sender, Channel)
 
-async def generate_and_send(account_key, message):
+
+async def _send_ai_reply(key: str, message):
     text = (message.text or message.raw_text or "").strip()
     if not text:
         return None
-    cfg = RUNTIME[account_key]["config"]
-    if store.is_common_mode():
-        persona = store.get_common_persona(cfg.persona)
-    else:
-        persona = store.get_persona(account_key, cfg.persona)
-    reply = await asyncio.to_thread(ai_reply.generate_reply, text, persona)
-    if reply:
-        await message.reply(reply)
-    return reply
 
-def build_client(cfg):
-    if not cfg.api_id or not cfg.api_hash or not cfg.session:
+    reply_text = await asyncio.to_thread(
+        ai_reply.generate_reply,
+        text,
+        _persona(key),
+    )
+    if not reply_text:
         return None
-    return TelegramClient(StringSession(cfg.session), cfg.api_id, cfg.api_hash)
 
-def register_handlers(account_key, client):
-    @client.on(events.NewMessage(outgoing=True, pattern=r'^/autoon$'))
-    async def autoon(event):
-        store.set_enabled(account_key, True)
-        await event.edit("✅ Этот аккаунт включён.")
+    await message.reply(reply_text)
+    return reply_text
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r'^/autooff$'))
-    async def autooff(event):
-        store.set_enabled(account_key, False)
-        await event.edit("⛔ Этот аккаунт выключен.")
 
-    @client.on(events.NewMessage(outgoing=True, pattern=r'^/persona(?:\s+([\s\S]+))?$'))
-    async def persona(event):
-        arg = event.pattern_match.group(1)
-        if arg:
-            store.set_persona(account_key, arg.strip())
-            await event.edit("✅ Персона сохранена для этого аккаунта.")
-        else:
-            cfg = RUNTIME[account_key]["config"]
-            await event.edit(store.get_persona(account_key, cfg.persona))
-
-    @client.on(events.NewMessage(outgoing=True, pattern=r'^/status$'))
-    async def status(event):
-        await event.edit(
-            f"{RUNTIME[account_key]['config'].name}\n"
-            f"Статус: {'🟢 включён' if store.is_enabled(account_key) else '🔴 выключен'}\n"
-            f"Gemini: {'🟢' if ai_reply.is_configured() else '🔴'}\n"
-            f"Групп: {len(store.list_groups(account_key))}"
-        )
+def _bind_handlers(key: str, client: TelegramClient) -> None:
+    rt = RUNTIME[key]
+    if rt["handler_bound"]:
+        return
 
     @client.on(events.NewMessage(incoming=True))
-    async def incoming(event):
-        # Account must be enabled, and common mode also has its own master switch.
-        if store.is_common_mode():
-            if not store.is_common_enabled():
-                return
-        elif not store.is_enabled(account_key):
-            return
-
-        chat_id = event.chat_id
-        # In common mode every account uses the shared group list.
-        allowed = store.is_common_allowed(chat_id) if store.is_common_mode() else store.is_allowed(account_key, chat_id)
-        if not allowed:
-            return
-
-        message = event.message
-        if not (message.text or message.raw_text):
-            return
-
-        if is_automatic_channel_forward(message):
-            if not store.is_autocomment_enabled(account_key):
-                return
-            if not store.bump_and_should_comment(account_key, chat_id):
-                return
-        else:
-            if store.is_common_mode():
-                if not store.is_common_reply_enabled(chat_id):
-                    return
-            else:
-                if not store.is_reply_enabled(account_key, chat_id):
-                    return
-            # Common mode defaults to one response per incoming message.
-            if not store.bump_and_should_reply_chat(account_key, chat_id):
-                return
-
+    async def incoming_handler(event):
         try:
-            await generate_and_send(account_key, message)
-        except Exception:
-            logger.exception("[%s] Ошибка обработки сообщения", account_key)
+            if not _allowed(key, event.chat_id):
+                return
+            if not _account_enabled(key):
+                return
 
-async def start_account(account_key):
-    runtime = RUNTIME[account_key]
-    if runtime["client"] is not None:
+            message = event.message
+
+            # Channel post forwarded into a discussion group.
+            if _is_automatic_channel_forward(message):
+                if not store.is_autocomment_enabled(key):
+                    return
+                if not store.bump_and_should_comment(key, event.chat_id):
+                    return
+                sent = await _send_ai_reply(key, message)
+                if sent:
+                    logger.info("[%s] autocomment sent in %s", key, event.chat_id)
+                return
+
+            # Normal participant message.
+            if not _reply_enabled(key, event.chat_id):
+                return
+            if not (message.text or message.raw_text):
+                return
+            if not store.bump_and_should_reply_chat(key, event.chat_id):
+                return
+
+            sent = await _send_ai_reply(key, message)
+            if sent:
+                logger.info("[%s] chat reply sent in %s", key, event.chat_id)
+
+        except Exception:
+            logger.exception("[%s] incoming handler failed", key)
+
+    rt["handler_bound"] = True
+
+
+async def start_account(key: str):
+    cfg = CONFIG_BY_KEY.get(key)
+    if cfg is None:
+        return False, f"Аккаунт {key} не найден."
+
+    rt = RUNTIME[key]
+
+    if rt.get("status") == "running" and rt.get("client"):
         return True, "Уже запущен."
 
-    client = build_client(runtime["config"])
-    if client is None:
-        return False, "Не заданы API_ID/API_HASH/SESSION."
+    if not cfg.api_id or not cfg.api_hash or not cfg.session:
+        msg = (
+            f"{cfg.name}: не настроен Telegram-сеанс. "
+            f"Нужна переменная {key.upper()}_SESSION; "
+            f"API_ID/API_HASH могут быть общими."
+        )
+        rt.update(status="error", error=msg)
+        logger.error(msg)
+        return False, msg
 
-    runtime["client"] = client
+    client = None
     try:
-        await client.connect()
-        if not await client.is_user_authorized():
-            raise RuntimeError("Telegram-сессия не авторизована. Добавьте корректный SESSION для этого аккаунта.")
+        client = TelegramClient(
+            StringSession(cfg.session),
+            int(cfg.api_id),
+            cfg.api_hash,
+        )
+        _bind_handlers(key, client)
+
+        rt.update(
+            client=client,
+            status="starting",
+            error="",
+            me=None,
+        )
+
+        await client.start()
         me = await client.get_me()
-        runtime["me"] = f"{me.first_name or ''} {me.last_name or ''}".strip()
-        runtime["status"] = "running"
-        register_handlers(account_key, client)
-        logger.info("[%s] запущен: %s", account_key, runtime["me"])
-        return True, f"Запущен: {runtime['me']}"
-    except Exception as e:
-        runtime["client"] = None
-        runtime["status"] = "error"
-        runtime["error"] = str(e)
-        logger.exception("[%s] Не удалось запустить", account_key)
-        return False, str(e)
 
-async def stop_account(account_key):
-    runtime = RUNTIME[account_key]
-    client = runtime.get("client")
-    if client:
+        rt.update(
+            client=client,
+            status="running",
+            error="",
+            me={
+                "id": getattr(me, "id", None),
+                "first_name": getattr(me, "first_name", None),
+                "username": getattr(me, "username", None),
+            },
+        )
+
+        logger.info(
+            "Telegram account started: %s (%s), id=%s",
+            cfg.name,
+            cfg.key,
+            getattr(me, "id", None),
+        )
+        return True, f"{cfg.name} запущен."
+
+    except Exception as exc:
+        logger.exception("Failed to start account %s", key)
+        if client is not None:
+            try:
+                await client.disconnect()
+            except Exception:
+                pass
+        rt.update(
+            client=None,
+            status="error",
+            error=f"{type(exc).__name__}: {exc}",
+            me=None,
+        )
+        return False, rt["error"]
+
+
+async def stop_account(key: str):
+    rt = RUNTIME.get(key)
+    if rt is None:
+        return False, f"Аккаунт {key} не найден."
+
+    client = rt.get("client")
+    if client is None:
+        rt.update(status="stopped", error="", me=None)
+        return True, "Уже остановлен."
+
+    try:
         await client.disconnect()
-    runtime["client"] = None
-    runtime["status"] = "stopped"
-    return True, "Остановлен."
+    except Exception as exc:
+        logger.warning("Disconnect %s failed: %s", key, exc)
 
-async def start_enabled_accounts():
+    rt.update(
+        client=None,
+        status="stopped",
+        error="",
+        me=None,
+        common_started=False,
+    )
+    logger.info("Telegram account stopped: %s", key)
+    return True, f"{CONFIG_BY_KEY[key].name} остановлен."
+
+
+async def start_initial_accounts():
+    # Personal mode: start accounts explicitly enabled in data/<key>.json.
+    # Common mode: the common master switch starts all accounts.
+    if _is_common_mode() and store.is_common_enabled():
+        for cfg in CONFIGS:
+            ok, msg = await start_account(cfg.key)
+            RUNTIME[cfg.key]["common_started"] = bool(ok)
+            if not ok:
+                logger.error("Initial start %s failed: %s", cfg.key, msg)
+    else:
+        for cfg in CONFIGS:
+            if store.is_enabled(cfg.key):
+                await start_account(cfg.key)
+
+
+async def shutdown_all():
     for cfg in CONFIGS:
-        if store.is_enabled(cfg.key):
-            await start_account(cfg.key)
+        if RUNTIME[cfg.key].get("client"):
+            await stop_account(cfg.key)
 
-
-async def start_common_accounts():
-    for cfg in CONFIGS:
-        ok, _ = await start_account(cfg.key)
-        if ok:
-            RUNTIME[cfg.key]["common_started"] = True
-
-def init_runtime():
-    for cfg in CONFIGS:
-        RUNTIME[cfg.key] = {
-            "config": cfg,
-            "client": None,
-            "status": "stopped",
-            "me": "",
-            "error": "",
-        }
 
 async def main():
-    init_runtime()
-    loop = asyncio.get_running_loop()
-    web_panel.set_runtime(RUNTIME, loop, start_account, stop_account)
-    threading.Thread(target=web_panel.run_panel, daemon=True).start()
+    global LOOP
+    LOOP = asyncio.get_running_loop()
 
-    if store.is_common_mode() and store.is_common_enabled():
-        await start_common_accounts()
-    else:
-        await start_enabled_accounts()
+    # This is the critical bridge:
+    # web_panel.RUNTIME[key] must reference the SAME runtime dict used here.
+    web_panel.set_runtime(
+        RUNTIME,
+        LOOP,
+        start_account,
+        stop_account,
+    )
 
-    while True:
-        await asyncio.sleep(3600)
+    logger.info("Loaded %d account configurations.", len(CONFIGS))
+    for cfg in CONFIGS:
+        logger.info(
+            "CONFIG %s: api=%s hash=%s session=%s",
+            cfg.key,
+            bool(cfg.api_id),
+            bool(cfg.api_hash),
+            bool(cfg.session),
+        )
+
+    await start_initial_accounts()
+
+    logger.info("Web panel starting...")
+    panel_thread = threading.Thread(
+        target=web_panel.run_panel,
+        name="web-panel",
+        daemon=True,
+    )
+    panel_thread.start()
+
+    try:
+        # Keep the single asyncio loop alive for all Telethon clients.
+        await asyncio.Event().wait()
+    finally:
+        await shutdown_all()
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
