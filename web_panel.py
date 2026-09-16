@@ -469,6 +469,8 @@ def account_page(key):
         store.set_autocomment_enabled(
             key, request.form.get("autocomment") == "1"
         )
+        # Personal auto-reply is a separate switch from Runtime.
+        store.set_enabled(key, request.form.get("auto_reply") == "1")
         return redirect(f"/account/{key}")
 
     rt = RUNTIME.get(key, {})
@@ -498,6 +500,10 @@ def account_page(key):
       <label>Ответы: <input name="chat_interval" type="number" min="1" value="{store.get_chat_interval(key)}"></label>
       <br><br>
       <label>Комментарии: <input name="comment_interval" type="number" min="1" value="{store.get_autocomment_interval(key)}"></label>
+      <br><br>
+      <label><input name="auto_reply" type="checkbox" value="1"
+      {'checked' if store.is_enabled(key) else ''} style="width:auto">
+      Личный автоответ</label>
       <br><br>
       <label><input name="autocomment" type="checkbox" value="1"
       {'checked' if store.is_autocomment_enabled(key) else ''} style="width:auto">
