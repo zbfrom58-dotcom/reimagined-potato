@@ -1,85 +1,42 @@
-"""
-Учётные записи для входа в веб-панель.
-
-Изначальный (главный) админ задаётся переменными окружения
-ADMIN_USERNAME и ADMIN_PASSWORD — он всегда может войти, даже если
-файл с пользователями пуст или удалён.
-
-Дополнительных пользователей (логин+пароль) можно выдавать прямо
-из веб-панели — они сохраняются в users.json (пароли хранятся
-только в виде хэша, не в открытом виде).
-"""
-
-import json
-import os
-
+import json, os
+from pathlib import Path
+from threading import RLock
 from werkzeug.security import generate_password_hash, check_password_hash
 
-USERS_FILE = "panel_users.json"
+PATH=Path("data/admins.json")
+LOCK=RLock()
 
+def _load():
+    with LOCK:
+        if not PATH.exists(): return {}
+        try: return json.loads(PATH.read_text(encoding="utf-8")) or {}
+        except (OSError,json.JSONDecodeError): return {}
 
-def _load() -> dict:
-    if not os.path.exists(USERS_FILE):
-        return {}
-    try:
-        with open(USERS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f) or {}
-    except (json.JSONDecodeError, FileNotFoundError):
-        return {}
+def _save(d):
+    PATH.parent.mkdir(exist_ok=True)
+    PATH.write_text(json.dumps(d,ensure_ascii=False,indent=2),encoding="utf-8")
 
+def bootstrap():
+    d=_load()
+    if not d and os.getenv("ADMIN_USERNAME") and os.getenv("ADMIN_PASSWORD"):
+        d[os.getenv("ADMIN_USERNAME").strip()] = generate_password_hash(os.getenv("ADMIN_PASSWORD"))
+        _save(d)
+    return d
 
-def _save(data: dict) -> None:
-    with open(USERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+def list_users():
+    return sorted(_load().keys())
 
+def verify(username,password):
+    d=bootstrap()
+    username=(username or "").strip()
+    return username in d and check_password_hash(d[username],password or "")
 
-def _main_admin():
-    username = os.getenv("ADMIN_USERNAME")
-    password = os.getenv("ADMIN_PASSWORD")
-    if username and password:
-        return username, password
-    return None, None
+def create_user(username,password):
+    username=(username or "").strip()
+    if len(username)<3 or len(password or "")<6 or username in _load(): return False
+    d=_load(); d[username]=generate_password_hash(password); _save(d); return True
 
-
-def verify(username: str, password: str) -> bool:
-    main_user, main_pass = _main_admin()
-    if main_user and username == main_user and password == main_pass:
-        return True
-
-    data = _load()
-    entry = data.get(username)
-    if not entry:
-        return False
-    return check_password_hash(entry["password_hash"], password)
-
-
-def add_user(username: str, password: str) -> tuple[bool, str]:
-    username = username.strip()
-    if not username or not password:
-        return False, "Логин и пароль не могут быть пустыми."
-
-    main_user, _ = _main_admin()
-    if main_user and username == main_user:
-        return False, "Этот логин зарезервирован под главного администратора."
-
-    data = _load()
-    if username in data:
-        return False, "Пользователь с таким логином уже существует."
-
-    data[username] = {"password_hash": generate_password_hash(password)}
-    _save(data)
-    return True, ""
-
-
-def remove_user(username: str) -> bool:
-    data = _load()
-    if username not in data:
-        return False
-    del data[username]
-    _save(data)
-    return True
-
-
-def list_users() -> list:
-    """Возвращает список логинов дополнительных пользователей (без главного админа)."""
-    return list(_load().keys())
+def delete_user(username):
+    d=_load()
+    if username not in d or len(d)<=1: return False
+    d.pop(username); _save(d); return True
