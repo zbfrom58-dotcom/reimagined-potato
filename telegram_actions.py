@@ -1,10 +1,9 @@
 import asyncio
 import re
-from urllib.parse import urlparse
-
+from urllib.parse import urlparse, parse_qs
 from telethon.errors import RPCError, UserAlreadyParticipantError, FloodWaitError
 from telethon.tl.functions.channels import JoinChannelRequest
-from telethon.tl.functions.messages import ImportChatInviteRequest, SendReactionRequest
+from telethon.tl.functions.messages import ImportChatInviteRequest, SendReactionRequest, GetDiscussionMessageRequest
 from telethon.tl.functions.account import ReportPeerRequest
 from telethon.tl.types import (
     ReactionEmoji,
@@ -14,10 +13,11 @@ from telethon.tl.types import (
     InputReportReasonIllegalDrugs,
     InputReportReasonOther,
 )
-
 PUBLIC_RE = re.compile(r"^/?([A-Za-z0-9_]{4,64})(?:/|$)")
 MESSAGE_RE = re.compile(r"^/?([A-Za-z0-9_]{4,64})/(\d+)(?:/|$)")
+PUBLIC_THREAD_MESSAGE_RE = re.compile(r"^/?([A-Za-z0-9_]{4,64})/(\d+)/(\d+)(?:/|$)")
 PRIVATE_MESSAGE_RE = re.compile(r"^/?c/(\d+)/(\d+)(?:/|$)")
+PRIVATE_THREAD_MESSAGE_RE = re.compile(r"^/?c/(\d+)/(\d+)/(\d+)(?:/|$)")
 PRIVATE_INVITE_RE = re.compile(r"^/?(?:\+|joinchat/)([A-Za-z0-9_-]+)$")
 
 
@@ -26,7 +26,6 @@ def _clean_url(value: str) -> str:
     if '://' not in value:
         value = 'https://' + value
     return value
-
 
 def parse_join_link(link: str) -> tuple[str, str]:
     url = _clean_url(link)
@@ -39,20 +38,147 @@ def parse_join_link(link: str) -> tuple[str, str]:
         return 'public', m.group(1)
     raise ValueError('Не удалось распознать ссылку на Telegram-группу/канал.')
 
+def parse_message_link(link: str) -> dict:
+    """Parse Telegram message links, including channel comment links.
 
-def parse_message_link(link: str) -> tuple[str, int | str]:
+    Supported examples:
+      https://t.me/channel/123
+      https://t.me/channel/123?comment=456
+      https://t.me/c/123456789/123
+      https://t.me/c/123456789/123?comment=456
+      https://t.me/channel/111/123?comment=456
+      https://t.me/c/123456789/111/123?comment=456
+
+    For a channel comment link, ``comment`` is the message ID in the linked
+    discussion group. Telegram documents this meaning for t.me message links.
+    """
     url = _clean_url(link)
-    path = urlparse(url).path
-    m = PRIVATE_MESSAGE_RE.match(path)
+    parsed = urlparse(url)
+    path = parsed.path
+    query = parse_qs(parsed.query, keep_blank_values=True)
+
+    # Private links: t.me/c/<internal_channel_id>/<message_id>
+    # and the newer thread form: t.me/c/<internal_channel_id>/<thread_id>/<message_id>.
+    m = PRIVATE_THREAD_MESSAGE_RE.match(path)
     if m:
-        # Telegram t.me/c/<internal_id>/<message_id> corresponds to peer -100<internal_id>.
-        return f"-100{m.group(1)}", int(m.group(2))
-    m = MESSAGE_RE.match(path)
-    if m:
-        return m.group(1), int(m.group(2))
-    raise ValueError('Нужна ссылка вида https://t.me/user/123 или https://t.me/c/1234567890/123.')
+        peer = f"-100{m.group(1)}"
+        msg_id = int(m.group(3))
+        thread_id = int(m.group(2))
+    else:
+        m = PRIVATE_MESSAGE_RE.match(path)
+        if not m:
+            m = None
+        if m:
+            peer = f"-100{m.group(1)}"
+            msg_id = int(m.group(2))
+            thread_id = None
+        else:
+            peer = None
+            msg_id = None
+            thread_id = None
+
+    if peer is None:
+        # Public links: t.me/<username>/<message_id> and the newer
+        # t.me/<username>/<thread_id>/<message_id> form.
+        m = PUBLIC_THREAD_MESSAGE_RE.match(path)
+        if m:
+            peer = m.group(1)
+            msg_id = int(m.group(3))
+            thread_id = int(m.group(2))
+        else:
+            m = MESSAGE_RE.match(path)
+            if m:
+                peer = m.group(1)
+                msg_id = int(m.group(2))
+                thread_id = None
+
+    if peer is None or msg_id is None:
+        raise ValueError(
+            'Нужна ссылка на Telegram-сообщение, например: '
+            'https://t.me/user/123, '
+            'https://t.me/user/123?comment=456 или '
+            'https://t.me/c/1234567890/123.'
+        )
+
+    comment_values = query.get('comment')
+    comment_id = None
+    if comment_values and comment_values[0].strip():
+        try:
+            comment_id = int(comment_values[0])
+        except ValueError as exc:
+            raise ValueError('Параметр comment в ссылке должен быть числом.') from exc
+        if comment_id <= 0:
+            raise ValueError('Параметр comment в ссылке должен быть положительным числом.')
+
+    return {
+        'peer': peer,
+        'msg_id': msg_id,
+        'thread_id': thread_id,
+        'comment_id': comment_id,
+    }
 
 
+async def _react(client, entity, msg_id: int, emoji: str) -> None:
+    await client(SendReactionRequest(
+        peer=entity,
+        msg_id=int(msg_id),
+        reaction=[ReactionEmoji(emoticon=emoji)],
+    ))
+
+
+async def _react_to_channel_comment(client, channel_entity, post_id: int, comment_id: int, emoji: str) -> None:
+    """React to a comment in the linked discussion group of a channel post."""
+    discussion = await client(
+        GetDiscussionMessageRequest(
+            peer=channel_entity,
+            msg_id=int(post_id),
+        )
+    )
+
+    # messages.getDiscussionMessage returns the linked discussion chat in
+    # ``chats``. Prefer a megagroup because channel comments live there.
+    discussion_entity = next(
+        (chat for chat in discussion.chats if getattr(chat, 'megagroup', False)),
+        None,
+    )
+    if discussion_entity is None:
+        # Fallback: use the first returned chat if Telegram did not expose
+        # the megagroup flag on this result.
+        discussion_entity = next(iter(discussion.chats), None)
+
+    if discussion_entity is None:
+        raise ValueError(
+            'Не удалось найти связанную discussion-группу для комментариев.'
+        )
+
+    await _react(client, discussion_entity, comment_id, emoji)
+
+
+async def react_to_message(client, link: str, emoji: str) -> str:
+    parsed = parse_message_link(link)
+    peer = parsed['peer']
+    msg_id = parsed['msg_id']
+    comment_id = parsed['comment_id']
+
+    entity = await client.get_entity(peer)
+
+    if comment_id is not None:
+        # Telegram's t.me link format defines ?comment=<id> as the ID of the
+        # comment in the linked discussion group. Resolve that group from the
+        # channel post and react to the comment there.
+        await _react_to_channel_comment(client, entity, msg_id, comment_id, emoji)
+        return 'реакция поставлена на комментарий'
+
+    await _react(client, entity, msg_id, emoji)
+    return 'реакция поставлена'
+
+REPORT_REASON_TYPES = {
+    "Спам": InputReportReasonSpam,
+    "Мошенничество": InputReportReasonFake,
+    "Насилие": InputReportReasonViolence,
+    "Незаконный контент": InputReportReasonIllegalDrugs,
+    "Другое": InputReportReasonOther,
+}
 async def join_target(client, link: str) -> str:
     kind, target = parse_join_link(link)
     if kind == 'private':
@@ -68,27 +194,6 @@ async def join_target(client, link: str) -> str:
     except UserAlreadyParticipantError:
         return 'уже состоит'
 
-
-async def react_to_message(client, link: str, emoji: str) -> str:
-    peer, msg_id = parse_message_link(link)
-    entity = await client.get_entity(peer)
-    await client(SendReactionRequest(
-        peer=entity,
-        msg_id=int(msg_id),
-        reaction=[ReactionEmoji(emoticon=emoji)],
-    ))
-    return 'реакция поставлена'
-
-
-
-REPORT_REASON_TYPES = {
-    "Спам": InputReportReasonSpam,
-    "Мошенничество": InputReportReasonFake,
-    "Насилие": InputReportReasonViolence,
-    "Незаконный контент": InputReportReasonIllegalDrugs,
-    "Другое": InputReportReasonOther,
-}
-
 async def report_peer(client, username: str, reason: str, subreason: str) -> str:
     """Send one legitimate Telegram peer report from one connected user account."""
     entity = await client.get_input_entity(username)
@@ -102,7 +207,6 @@ async def report_peer(client, username: str, reason: str, subreason: str) -> str
     if result is False:
         raise RuntimeError("Telegram отклонил отправку жалобы.")
     return "жалоба отправлена"
-
 async def run_single_report(username: str, reason: str, subreason: str, account_key: str, runtime: dict, start_account):
     rt = runtime.get(account_key)
     if rt is None:
@@ -132,7 +236,6 @@ async def run_single_report(username: str, reason: str, subreason: str, account_
                 pass
             runtime[account_key]['client'] = None
             runtime[account_key]['status'] = 'stopped'
-
 async def run_for_accounts(action: str, link: str, account_keys: list[str], emoji: str | None, runtime: dict, start_account):
     results = []
     for key in account_keys:
