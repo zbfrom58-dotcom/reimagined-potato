@@ -5,7 +5,15 @@ from urllib.parse import urlparse
 from telethon.errors import RPCError, UserAlreadyParticipantError, FloodWaitError
 from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.functions.messages import ImportChatInviteRequest, SendReactionRequest
-from telethon.tl.types import ReactionEmoji
+from telethon.tl.functions.account import ReportPeerRequest
+from telethon.tl.types import (
+    ReactionEmoji,
+    InputReportReasonSpam,
+    InputReportReasonFake,
+    InputReportReasonViolence,
+    InputReportReasonIllegalDrugs,
+    InputReportReasonOther,
+)
 
 PUBLIC_RE = re.compile(r"^/?([A-Za-z0-9_]{4,64})(?:/|$)")
 MESSAGE_RE = re.compile(r"^/?([A-Za-z0-9_]{4,64})/(\d+)(?:/|$)")
@@ -71,6 +79,59 @@ async def react_to_message(client, link: str, emoji: str) -> str:
     ))
     return 'реакция поставлена'
 
+
+
+REPORT_REASON_TYPES = {
+    "Спам": InputReportReasonSpam,
+    "Мошенничество": InputReportReasonFake,
+    "Насилие": InputReportReasonViolence,
+    "Незаконный контент": InputReportReasonIllegalDrugs,
+    "Другое": InputReportReasonOther,
+}
+
+async def report_peer(client, username: str, reason: str, subreason: str) -> str:
+    """Send one legitimate Telegram peer report from one connected user account."""
+    entity = await client.get_input_entity(username)
+    reason_cls = REPORT_REASON_TYPES.get(reason, InputReportReasonOther)
+    detail = subreason.strip() if subreason else ""
+    result = await client(ReportPeerRequest(
+        peer=entity,
+        reason=reason_cls(),
+        message=detail,
+    ))
+    if result is False:
+        raise RuntimeError("Telegram отклонил отправку жалобы.")
+    return "жалоба отправлена"
+
+async def run_single_report(username: str, reason: str, subreason: str, account_key: str, runtime: dict, start_account):
+    rt = runtime.get(account_key)
+    if rt is None:
+        return {"account": account_key, "ok": False, "message": "Аккаунт не найден"}
+    started_here = False
+    try:
+        client = rt.get("client")
+        if client is None:
+            ok, msg = await start_account(account_key)
+            if not ok:
+                return {"account": account_key, "ok": False, "message": msg}
+            client = runtime[account_key].get("client")
+            started_here = True
+        message = await report_peer(client, username, reason, subreason)
+        return {"account": account_key, "ok": True, "message": message}
+    except FloodWaitError as e:
+        return {"account": account_key, "ok": False, "message": f"FloodWait: повторить через {e.seconds} сек."}
+    except (RPCError, ValueError, TypeError) as e:
+        return {"account": account_key, "ok": False, "message": str(e)}
+    except Exception as e:
+        return {"account": account_key, "ok": False, "message": f"{type(e).__name__}: {e}"}
+    finally:
+        if started_here:
+            try:
+                await runtime[account_key]['client'].disconnect()
+            except Exception:
+                pass
+            runtime[account_key]['client'] = None
+            runtime[account_key]['status'] = 'stopped'
 
 async def run_for_accounts(action: str, link: str, account_keys: list[str], emoji: str | None, runtime: dict, start_account):
     results = []

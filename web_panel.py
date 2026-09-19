@@ -569,19 +569,38 @@ def reports_page():
         if username and not username.startswith('@'):
             username = '@' + username
         valid_subreasons = REPORT_REASONS.get(reason, [])
-        if not username or not reason or subreason not in valid_subreasons or not selected:
-            flash = "<div class='flash err'>Укажи @username, причину, подпричину и выбери хотя бы один аккаунт.</div>"
+        if not username or not reason or subreason not in valid_subreasons or len(selected) != 1:
+            flash = "<div class='flash err'>Укажи @username, причину, подпричину и выбери ровно один аккаунт.</div>"
         else:
-            results = [{'account': key, 'ok': True, 'message': 'Выбран для индивидуальной обработки; отправка жалобы выполняется вручную в Telegram.'} for key in selected]
-            actions_store.add({
-                'type': 'report',
-                'username': username,
-                'reason': reason,
-                'subreason': subreason,
-                'count': len(selected),
-                'results': results,
-            })
-            flash = f"<div class='flash'>✅ Заявка подтверждена: выбрано {len(selected)} аккаунтов. Для каждого аккаунта создана отдельная запись на ручную обработку.</div>"
+            try:
+                from telegram_actions import run_single_report
+                account_key = selected[0]
+                result = run_async(
+                    run_single_report(username, reason, subreason, account_key, RUNTIME, START_ACCOUNT),
+                    timeout=60,
+                )
+                actions_store.add({
+                    'type': 'report',
+                    'username': username,
+                    'reason': reason,
+                    'subreason': subreason,
+                    'count': 1,
+                    'results': [result],
+                })
+                if result.get('ok'):
+                    flash = f"<div class='flash'>✅ Жалоба отправлена через {account_key}: {result.get('message', 'готово')}.</div>"
+                else:
+                    flash = f"<div class='flash err'>❌ Жалоба не отправлена через {account_key}: {result.get('message', 'неизвестная ошибка')}.</div>"
+            except Exception as e:
+                actions_store.add({
+                    'type': 'report',
+                    'username': username,
+                    'reason': reason,
+                    'subreason': subreason,
+                    'count': 1,
+                    'results': [{'account': selected[0], 'ok': False, 'message': f'{type(e).__name__}: {e}'}],
+                })
+                flash = f"<div class='flash err'>❌ Ошибка отправки: {type(e).__name__}: {e}</div>"
 
     items = [x for x in actions_store.list_items(40) if x.get('type') == 'report']
     history = ''
@@ -616,8 +635,8 @@ def reports_page():
         <p class='muted'>Подпричина проверяется сервером и должна соответствовать выбранной причине.</p>
         <h2>Аккаунты</h2>
         <div>{_account_checkboxes('accounts')}</div>
-        <p class='muted'>Ты сам выбираешь аккаунты. После подтверждения для каждого выбранного аккаунта создаётся отдельная запись для ручной обработки жалобы.</p>
-        <button>✅ Подтвердить</button>
+        <p class='muted'>Ты сам выбираешь аккаунты. После подтверждения жалоба отправляется сразу через один выбранный подключённый аккаунт.</p>
+        <button>🚩 Отправить жалобу</button>
       </form>
     </div>
     <h2>История жалоб</h2>
