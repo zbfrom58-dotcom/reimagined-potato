@@ -561,87 +561,210 @@ REPORT_REASONS = {
 @login_required
 def reports_page():
     flash = ''
+
+    # Manual queue for selected accounts. The queue only prepares the next
+    # account; each report still requires a separate user action.
+    queue = session.get('report_queue', [])
+    current = int(session.get('report_current', 0) or 0)
+    saved = session.get('report_form', {})
+
     if request.method == 'POST':
-        username = request.form.get('username', '').strip()
-        reason = request.form.get('reason', '').strip()
-        subreason = request.form.get('subreason', '').strip()
-        selected = request.form.getlist('accounts')
-        if username and not username.startswith('@'):
-            username = '@' + username
-        valid_subreasons = REPORT_REASONS.get(reason, [])
-        if not username or not reason or subreason not in valid_subreasons or len(selected) != 1:
-            flash = "<div class='flash err'>Укажи @username, причину, подпричину и выбери ровно один аккаунт.</div>"
-        else:
-            try:
-                from telegram_actions import run_single_report
-                account_key = selected[0]
-                result = run_async(
-                    run_single_report(username, reason, subreason, account_key, RUNTIME, START_ACCOUNT),
-                    timeout=60,
-                )
-                actions_store.add({
-                    'type': 'report',
+        action = request.form.get('action', 'prepare')
+
+        if action == 'prepare':
+            username = request.form.get('username', '').strip()
+            reason = request.form.get('reason', '').strip()
+            subreason = request.form.get('subreason', '').strip()
+            selected = request.form.getlist('accounts')
+
+            if username and not username.startswith('@'):
+                username = '@' + username
+
+            valid_subreasons = REPORT_REASONS.get(reason, [])
+
+            if not username or not reason or subreason not in valid_subreasons or not selected:
+                flash = "<div class='flash err'>Укажи @username, причину, подпричину и выбери хотя бы один аккаунт.</div>"
+            else:
+                session['report_form'] = {
                     'username': username,
                     'reason': reason,
                     'subreason': subreason,
-                    'count': 1,
-                    'results': [result],
-                })
-                if result.get('ok'):
-                    flash = f"<div class='flash'>✅ Жалоба отправлена через {account_key}: {result.get('message', 'готово')}.</div>"
-                else:
-                    flash = f"<div class='flash err'>❌ Жалоба не отправлена через {account_key}: {result.get('message', 'неизвестная ошибка')}.</div>"
-            except Exception as e:
-                actions_store.add({
-                    'type': 'report',
-                    'username': username,
-                    'reason': reason,
-                    'subreason': subreason,
-                    'count': 1,
-                    'results': [{'account': selected[0], 'ok': False, 'message': f'{type(e).__name__}: {e}'}],
-                })
-                flash = f"<div class='flash err'>❌ Ошибка отправки: {type(e).__name__}: {e}</div>"
+                }
+                session['report_queue'] = selected
+                session['report_current'] = 0
+                return redirect(url_for('reports_page'))
+
+        elif action == 'send_next':
+            queue = session.get('report_queue', [])
+            current = int(session.get('report_current', 0) or 0)
+            saved = session.get('report_form', {})
+
+            if current >= len(queue):
+                flash = "<div class='flash err'>Очередь жалоб пуста.</div>"
+            else:
+                account_key = queue[current]
+                username = saved.get('username', '')
+                reason = saved.get('reason', '')
+                subreason = saved.get('subreason', '')
+
+                try:
+                    from telegram_actions import run_single_report
+                    result = run_async(
+                        run_single_report(
+                            username, reason, subreason,
+                            account_key, RUNTIME, START_ACCOUNT
+                        ),
+                        timeout=60,
+                    )
+
+                    actions_store.add({
+                        'type': 'report',
+                        'username': username,
+                        'reason': reason,
+                        'subreason': subreason,
+                        'count': 1,
+                        'results': [result],
+                    })
+
+                    if result.get('ok'):
+                        flash = f"<div class='flash'>✅ Жалоба отправлена через {account_key}.</div>"
+                    else:
+                        flash = f"<div class='flash err'>❌ Жалоба не отправлена через {account_key}: {result.get('message', 'неизвестная ошибка')}</div>"
+
+                except Exception as e:
+                    result = {
+                        'account': account_key,
+                        'ok': False,
+                        'message': f'{type(e).__name__}: {e}',
+                    }
+                    actions_store.add({
+                        'type': 'report',
+                        'username': username,
+                        'reason': reason,
+                        'subreason': subreason,
+                        'count': 1,
+                        'results': [result],
+                    })
+                    flash = f"<div class='flash err'>❌ Ошибка через {account_key}: {type(e).__name__}: {e}</div>"
+
+                # Move to the next account only after this manual action.
+                session['report_current'] = current + 1
+
+                if current + 1 >= len(queue):
+                    session.pop('report_queue', None)
+                    session.pop('report_current', None)
+                    flash += "<div class='muted' style='margin-top:8px'>Очередь закончена.</div>"
+
+        elif action == 'clear_queue':
+            session.pop('report_queue', None)
+            session.pop('report_current', None)
+            session.pop('report_form', None)
+            return redirect(url_for('reports_page'))
+
+    queue = session.get('report_queue', [])
+    current = int(session.get('report_current', 0) or 0)
+    saved = session.get('report_form', {})
+    active_account = queue[current] if current < len(queue) else None
 
     items = [x for x in actions_store.list_items(40) if x.get('type') == 'report']
-    history = ''
     if not items:
         history = "<div class='card'><div class='muted'>История жалоб пока пустая.</div></div>"
     else:
-        blocks=[]
+        blocks = []
         for item in items:
-            accounts_html = ''.join(f"<div>{r.get('account')}: {'🟢' if r.get('ok') else '🔴'} {r.get('message','')}</div>" for r in item.get('results', []))
-            blocks.append(f"<div class='card'><div class='row'><b>{item.get('username','')}</b><span class='pill'>{item.get('reason','')} · {item.get('subreason','')}</span></div><div class='muted' style='margin-top:6px'>{item.get('created_at','')} · аккаунтов: {item.get('count',0)}</div><details style='margin-top:10px'><summary>Аккаунты</summary><div style='margin-top:8px'>{accounts_html}</div></details></div>")
-        history=''.join(blocks)
+            results = item.get('results', [])
+            accounts_html = ''.join(
+                f"<div>{r.get('account', '')}: "
+                f"{'🟢' if r.get('ok') else '🔴'} "
+                f"{r.get('message', '')}</div>"
+                for r in results
+            )
+            blocks.append(
+                f"<div class='card'>"
+                f"<div class='row'><b>{item.get('username', '')}</b>"
+                f"<span class='pill'>{item.get('reason', '')} · {item.get('subreason', '')}</span></div>"
+                f"<div class='muted' style='margin-top:6px'>"
+                f"{item.get('created_at', '')} · аккаунтов: {len(results)}</div>"
+                f"<details style='margin-top:10px'><summary>Аккаунты</summary>"
+                f"<div style='margin-top:8px'>{accounts_html}</div></details></div>"
+            )
+        history = ''.join(blocks)
 
-    reason_options=''.join(f"<option value='{r}'>{r}</option>" for r in REPORT_REASONS)
-    body=f"""
+    reason_options = ''.join(
+        f"<option value='{r}' {'selected' if saved.get('reason') == r else ''}>{r}</option>"
+        for r in REPORT_REASONS
+    )
+
+    subreason_options = ''.join(
+        f"<option value='{x}' {'selected' if saved.get('subreason') == x else ''}>{x}</option>"
+        for values in REPORT_REASONS.values()
+        for x in values
+    )
+
+    selected_accounts = set(queue)
+
+    queue_card = ''
+    if active_account:
+        queue_card = f"""
+        <div class='card'>
+          <div class='row'>
+            <div>
+              <b>📋 Очередь: {current + 1}/{len(queue)}</b>
+              <div class='muted'>Следующий аккаунт: {active_account}</div>
+            </div>
+            <form method='post'>
+              <input type='hidden' name='action' value='clear_queue'>
+              <button class='ghost'>✖ Очистить очередь</button>
+            </form>
+          </div>
+          <br>
+          <form method='post'>
+            <input type='hidden' name='action' value='send_next'>
+            <button>🚩 Отправить через {active_account}</button>
+          </form>
+        </div>
+        """
+
+    body = f"""
     <h2>🚩 Жалобы</h2>
     {flash}
+    {queue_card}
     <div class='card'>
       <h2 style='margin-top:0'>Нарушитель</h2>
       <form method='post'>
-        <input name='username' placeholder='@username' required>
+        <input type='hidden' name='action' value='prepare'>
+        <input name='username' value='{saved.get('username', '')}' placeholder='@username' required>
         <br><br>
+
         <label>Причина</label><br><br>
         <select name='reason' required style='background:var(--card2);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:9px;width:100%'>
           <option value=''>Выбери причину</option>{reason_options}
         </select>
+
         <br><br>
         <label>Подпричина</label><br><br>
         <select name='subreason' required style='background:var(--card2);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:9px;width:100%'>
           <option value=''>Сначала выбери причину</option>
-          {''.join(f"<option value='{x}'>{x}</option>" for vals in REPORT_REASONS.values() for x in vals)}
+          {subreason_options}
         </select>
+
         <p class='muted'>Подпричина проверяется сервером и должна соответствовать выбранной причине.</p>
+
         <h2>Аккаунты</h2>
-        <div>{_account_checkboxes('accounts')}</div>
-        <p class='muted'>Ты сам выбираешь аккаунты. После подтверждения жалоба отправляется сразу через один выбранный подключённый аккаунт.</p>
-        <button>🚩 Отправить жалобу</button>
+        <div>{_account_checkboxes('accounts', selected_accounts)}</div>
+        <p class='muted'>
+          Выбери несколько аккаунтов. Нажатие «Подготовить очередь» сохранит форму.
+          Отправка выполняется вручную по одному аккаунту.
+        </p>
+
+        <button>📋 Подготовить очередь</button>
       </form>
     </div>
+
     <h2>История жалоб</h2>
     {history}
     """
+
     return page('Жалобы', body, active='reports')
 
 @app.route('/reactions', methods=['GET', 'POST'])
