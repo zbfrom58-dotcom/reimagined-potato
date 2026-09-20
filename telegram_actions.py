@@ -195,17 +195,61 @@ async def join_target(client, link: str) -> str:
         return 'уже состоит'
 
 async def report_peer(client, username: str, reason: str, subreason: str) -> str:
-    """Send one legitimate Telegram peer report from one connected user account."""
+    """Send one Telegram peer report and log the RPC call/result for diagnostics."""
+    print(
+        f"[REPORT] Подготовка: target={username!r}, "
+        f"reason={reason!r}, subreason={subreason!r}",
+        flush=True,
+    )
+
     entity = await client.get_input_entity(username)
+    print(
+        f"[REPORT] get_input_entity OK: target={username!r}, "
+        f"entity_type={type(entity).__name__}",
+        flush=True,
+    )
+
     reason_cls = REPORT_REASON_TYPES.get(reason, InputReportReasonOther)
     detail = subreason.strip() if subreason else ""
-    result = await client(ReportPeerRequest(
-        peer=entity,
-        reason=reason_cls(),
-        message=detail,
-    ))
+
+    print(
+        f"[REPORT] ДО ReportPeerRequest: target={username!r}, "
+        f"reason_type={reason_cls.__name__}, detail={detail!r}",
+        flush=True,
+    )
+
+    try:
+        result = await client(ReportPeerRequest(
+            peer=entity,
+            reason=reason_cls(),
+            message=detail,
+        ))
+    except Exception as exc:
+        print(
+            f"[REPORT] ОШИБКА ReportPeerRequest: "
+            f"{type(exc).__name__}: {exc}",
+            flush=True,
+        )
+        raise
+
+    print(
+        f"[REPORT] ПОСЛЕ ReportPeerRequest: "
+        f"target={username!r}, result_type={type(result).__name__}, "
+        f"result={result!r}",
+        flush=True,
+    )
+
     if result is False:
+        print(
+            f"[REPORT] Telegram вернул False: target={username!r}",
+            flush=True,
+        )
         raise RuntimeError("Telegram отклонил отправку жалобы.")
+
+    print(
+        f"[REPORT] RPC завершён без исключения: target={username!r}",
+        flush=True,
+    )
     return "жалоба отправлена"
 async def run_single_report(username: str, reason: str, subreason: str, account_key: str, runtime: dict, start_account):
     rt = runtime.get(account_key)
