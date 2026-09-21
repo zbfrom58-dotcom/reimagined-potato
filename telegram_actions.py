@@ -118,6 +118,28 @@ def parse_message_link(link: str) -> dict:
     }
 
 
+async def _resolve_reaction_peer(client, peer):
+    """Resolve a reaction target, including private /c/<id>/<msg> links.
+
+    Some Telethon sessions can know a private megagroup only through the
+    dialog/entity cache. Try the normal resolver first, then fall back to
+    the account's dialogs.
+    """
+    try:
+        return await client.get_input_entity(peer)
+    except Exception as first_error:
+        try:
+            target_id = int(peer)
+        except (TypeError, ValueError):
+            raise first_error
+
+        async for dialog in client.iter_dialogs():
+            if int(dialog.id) == target_id:
+                return await client.get_input_entity(dialog.entity)
+
+        raise first_error
+
+
 async def _react(client, entity, msg_id: int, emoji: str) -> None:
     await client(SendReactionRequest(
         peer=entity,
@@ -160,7 +182,12 @@ async def react_to_message(client, link: str, emoji: str) -> str:
     msg_id = parsed['msg_id']
     comment_id = parsed['comment_id']
 
-    entity = await client.get_entity(peer)
+    # For private /c/... links use an InputPeer resolved from the account's
+    # own access/cache. This is more reliable for private megagroups.
+    if str(peer).startswith("-100"):
+        entity = await _resolve_reaction_peer(client, peer)
+    else:
+        entity = await client.get_input_entity(peer)
 
     if comment_id is not None:
         # Telegram's t.me link format defines ?comment=<id> as the ID of the
@@ -195,61 +222,17 @@ async def join_target(client, link: str) -> str:
         return 'уже состоит'
 
 async def report_peer(client, username: str, reason: str, subreason: str) -> str:
-    """Send one Telegram peer report and log the RPC call/result for diagnostics."""
-    print(
-        f"[REPORT] Подготовка: target={username!r}, "
-        f"reason={reason!r}, subreason={subreason!r}",
-        flush=True,
-    )
-
+    """Send one legitimate Telegram peer report from one connected user account."""
     entity = await client.get_input_entity(username)
-    print(
-        f"[REPORT] get_input_entity OK: target={username!r}, "
-        f"entity_type={type(entity).__name__}",
-        flush=True,
-    )
-
     reason_cls = REPORT_REASON_TYPES.get(reason, InputReportReasonOther)
     detail = subreason.strip() if subreason else ""
-
-    print(
-        f"[REPORT] ДО ReportPeerRequest: target={username!r}, "
-        f"reason_type={reason_cls.__name__}, detail={detail!r}",
-        flush=True,
-    )
-
-    try:
-        result = await client(ReportPeerRequest(
-            peer=entity,
-            reason=reason_cls(),
-            message=detail,
-        ))
-    except Exception as exc:
-        print(
-            f"[REPORT] ОШИБКА ReportPeerRequest: "
-            f"{type(exc).__name__}: {exc}",
-            flush=True,
-        )
-        raise
-
-    print(
-        f"[REPORT] ПОСЛЕ ReportPeerRequest: "
-        f"target={username!r}, result_type={type(result).__name__}, "
-        f"result={result!r}",
-        flush=True,
-    )
-
+    result = await client(ReportPeerRequest(
+        peer=entity,
+        reason=reason_cls(),
+        message=detail,
+    ))
     if result is False:
-        print(
-            f"[REPORT] Telegram вернул False: target={username!r}",
-            flush=True,
-        )
         raise RuntimeError("Telegram отклонил отправку жалобы.")
-
-    print(
-        f"[REPORT] RPC завершён без исключения: target={username!r}",
-        flush=True,
-    )
     return "жалоба отправлена"
 async def run_single_report(username: str, reason: str, subreason: str, account_key: str, runtime: dict, start_account):
     rt = runtime.get(account_key)
