@@ -5,33 +5,27 @@ import requests
 logger = logging.getLogger(__name__)
 
 MODEL = "deepseek-flash"
-BASE_URL = "https://api.deepseek.com"
+BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.xspase.ru/v1").rstrip("/")
 TIMEOUT = 20
 
-
-def _load_key() -> str | None:
+def _load_key():
     value = os.getenv("DEEPSEEK_API_KEY")
     return value.strip() if value and value.strip() else None
 
-
-def is_configured() -> bool:
+def is_configured():
     return bool(_load_key())
 
-
-def list_configured_keys() -> int:
+def list_configured_keys():
     return 1 if _load_key() else 0
-
 
 def list_models():
     return [MODEL] if _load_key() else []
 
-
-def generate_reply(user_message: str, persona: str, *, extra_context: str = "") -> str | None:
+def generate_reply(user_message, persona, *, extra_context=""):
     key = _load_key()
     if not key:
         logger.warning("DeepSeek API key is not configured")
         return None
-
     system_prompt = (
         f"{persona}\n\n"
         "Правила:\n"
@@ -42,7 +36,6 @@ def generate_reply(user_message: str, persona: str, *, extra_context: str = "") 
         "- Обычно 1–2 коротких предложения.\n"
         f"{extra_context}"
     )
-
     payload = {
         "model": MODEL,
         "messages": [
@@ -54,34 +47,22 @@ def generate_reply(user_message: str, persona: str, *, extra_context: str = "") 
         "stream": False,
         "thinking": {"type": "disabled"},
     }
-
     try:
-        response = requests.post(
+        r = requests.post(
             f"{BASE_URL}/chat/completions",
-            headers={
-                "Authorization": f"Bearer {key}",
-                "Content-Type": "application/json",
-            },
+            headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
             json=payload,
             timeout=TIMEOUT,
         )
-        if response.status_code != 200:
-            logger.error("DeepSeek HTTP %s: %s", response.status_code, response.text[:500])
+        if r.status_code != 200:
+            logger.error("DeepSeek HTTP %s: %s", r.status_code, r.text[:500])
             return None
-
-        data = response.json()
-        choices = data.get("choices") or []
+        choices = (r.json().get("choices") or [])
         if not choices:
-            logger.warning("DeepSeek вернул ответ без choices")
             return None
-
-        text = ((choices[0].get("message") or {}).get("content") or "").strip()
-        return text or None
-
+        return ((choices[0].get("message") or {}).get("content") or "").strip() or None
     except requests.Timeout:
         logger.warning("DeepSeek timeout")
     except requests.RequestException as e:
         logger.warning("Ошибка DeepSeek: %s", e)
-    except (ValueError, TypeError, KeyError) as e:
-        logger.warning("Не удалось разобрать ответ DeepSeek: %s", e)
     return None
